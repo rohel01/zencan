@@ -25,13 +25,14 @@ pub mod sdo;
 mod time_types;
 pub mod traits;
 
-#[cfg(feature = "socketcan")]
+#[cfg(all(feature = "socketcan", target_os = "linux"))]
 mod socketcan;
 
-#[cfg(feature = "socketcan")]
-#[cfg_attr(docsrs, doc(cfg(feature = "socketcan")))]
-pub use socketcan::open_socketcan;
+#[cfg(all(feature = "socketcan", target_os = "linux"))]
+#[cfg_attr(docsrs, doc(all(feature = "socketcan", target_os = "linux")))]
+pub use socketcan::{open_socketcan, SocketCanReceiver, SocketCanSender};
 
+pub use arbitrary_int::{i24, u24};
 pub use messages::{CanError, CanId, CanMessage};
 pub use node_id::NodeId;
 pub use time_types::{TimeDifference, TimeOfDay};

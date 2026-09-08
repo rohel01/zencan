@@ -55,27 +55,28 @@ fn get_sub_field_name(sub: &SubDefinition) -> Result<syn::Ident, CompileError> {
 }
 
 /// Get the struct attribute type used to store this type
-fn get_storage_type(data_type: DCDataType) -> (syn::Type, usize) {
+fn get_storage_type(data_type: DCDataType) -> syn::Type {
     match data_type {
-        DCDataType::Boolean => (syn::parse_quote!(ScalarField<bool>), 1),
-        DCDataType::Int8 => (syn::parse_quote!(ScalarField<i8>), 1),
-        DCDataType::Int16 => (syn::parse_quote!(ScalarField<i16>), 2),
-        DCDataType::Int32 => (syn::parse_quote!(ScalarField<i32>), 4),
-        DCDataType::Int64 => (syn::parse_quote!(ScalarField<i64>), 8),
-        DCDataType::UInt8 => (syn::parse_quote!(ScalarField<u8>), 1),
-        DCDataType::UInt16 => (syn::parse_quote!(ScalarField<u16>), 2),
-        DCDataType::UInt32 => (syn::parse_quote!(ScalarField<u32>), 4),
-        DCDataType::UInt64 => (syn::parse_quote!(ScalarField<u64>), 8),
-        DCDataType::Real32 => (syn::parse_quote!(ScalarField<f32>), 4),
-        DCDataType::Real64 => (syn::parse_quote!(ScalarField<f64>), 8),
-        DCDataType::VisibleString(n) | DCDataType::UnicodeString(n) => (
-            syn::parse_str(&format!("NullTermByteField::<{}>", n)).unwrap(),
-            n,
-        ),
-        DCDataType::OctetString(n) => (syn::parse_str(&format!("ByteField::<{}>", n)).unwrap(), n),
-        DCDataType::TimeOfDay => (syn::parse_quote!(ScalarField<TimeOfDay>), 6),
-        DCDataType::TimeDifference => (syn::parse_quote!(ScalarField<TimeDifference>), 6),
-        DCDataType::Domain => (syn::parse_quote!(CallbackSubObject), 0),
+        DCDataType::Boolean => syn::parse_quote!(ScalarField<bool>),
+        DCDataType::Int8 => syn::parse_quote!(ScalarField<i8>),
+        DCDataType::Int16 => syn::parse_quote!(ScalarField<i16>),
+        DCDataType::Int24 => syn::parse_quote!(ScalarField<i24>),
+        DCDataType::Int32 => syn::parse_quote!(ScalarField<i32>),
+        DCDataType::Int64 => syn::parse_quote!(ScalarField<i64>),
+        DCDataType::UInt8 => syn::parse_quote!(ScalarField<u8>),
+        DCDataType::UInt16 => syn::parse_quote!(ScalarField<u16>),
+        DCDataType::UInt24 => syn::parse_quote!(ScalarField<u24>),
+        DCDataType::UInt32 => syn::parse_quote!(ScalarField<u32>),
+        DCDataType::UInt64 => syn::parse_quote!(ScalarField<u64>),
+        DCDataType::Real32 => syn::parse_quote!(ScalarField<f32>),
+        DCDataType::Real64 => syn::parse_quote!(ScalarField<f64>),
+        DCDataType::VisibleString(n) | DCDataType::UnicodeString(n) => {
+            syn::parse_str(&format!("NullTermByteField::<{}>", n)).unwrap()
+        }
+        DCDataType::OctetString(n) => syn::parse_str(&format!("ByteField::<{}>", n)).unwrap(),
+        DCDataType::TimeOfDay => syn::parse_quote!(ScalarField<TimeOfDay>),
+        DCDataType::TimeDifference => syn::parse_quote!(ScalarField<TimeDifference>),
+        DCDataType::Domain => syn::parse_quote!(CallbackSubObject),
     }
 }
 
@@ -84,10 +85,12 @@ fn get_rust_type_and_size(data_type: DCDataType) -> (syn::Type, usize) {
         DCDataType::Boolean => (syn::parse_quote!(bool), 1),
         DCDataType::Int8 => (syn::parse_quote!(i8), 1),
         DCDataType::Int16 => (syn::parse_quote!(i16), 2),
+        DCDataType::Int24 => (syn::parse_quote!(i24), 3),
         DCDataType::Int32 => (syn::parse_quote!(i32), 4),
         DCDataType::Int64 => (syn::parse_quote!(i64), 8),
         DCDataType::UInt8 => (syn::parse_quote!(u8), 1),
         DCDataType::UInt16 => (syn::parse_quote!(u16), 2),
+        DCDataType::UInt24 => (syn::parse_quote!(u24), 3),
         DCDataType::UInt32 => (syn::parse_quote!(u32), 4),
         DCDataType::UInt64 => (syn::parse_quote!(u64), 8),
         DCDataType::Real32 => (syn::parse_quote!(f32), 4),
@@ -129,10 +132,12 @@ fn data_type_to_tokens(dt: DCDataType) -> TokenStream {
         DCDataType::Boolean => quote!(zencan_node::common::objects::DataType::Boolean),
         DCDataType::Int8 => quote!(zencan_node::common::objects::DataType::Int8),
         DCDataType::Int16 => quote!(zencan_node::common::objects::DataType::Int16),
+        DCDataType::Int24 => quote!(zencan_node::common::objects::DataType::Int24),
         DCDataType::Int32 => quote!(zencan_node::common::objects::DataType::Int32),
         DCDataType::Int64 => quote!(zencan_node::common::objects::DataType::Int64),
         DCDataType::UInt8 => quote!(zencan_node::common::objects::DataType::UInt8),
         DCDataType::UInt16 => quote!(zencan_node::common::objects::DataType::UInt16),
+        DCDataType::UInt24 => quote!(zencan_node::common::objects::DataType::UInt24),
         DCDataType::UInt32 => quote!(zencan_node::common::objects::DataType::UInt32),
         DCDataType::UInt64 => quote!(zencan_node::common::objects::DataType::UInt64),
         DCDataType::Real32 => quote!(zencan_node::common::objects::DataType::Real32),
@@ -197,7 +202,7 @@ fn generate_object_definition(obj: &ObjectDefinition) -> Result<TokenStream, Com
         Object::Record(def) => {
             for sub in &def.subs {
                 let field_name = get_sub_field_name(sub)?;
-                let (field_type, _) = get_storage_type(sub.data_type);
+                let field_type = get_storage_type(sub.data_type);
                 field_tokens.extend(quote! {
                     pub #field_name: #field_type,
                 });
@@ -206,7 +211,7 @@ fn generate_object_definition(obj: &ObjectDefinition) -> Result<TokenStream, Com
             }
         }
         Object::Array(def) => {
-            let (field_type, _) = get_storage_type(def.data_type);
+            let field_type = get_storage_type(def.data_type);
             let array_size = def.array_size;
             field_tokens.extend(quote! {
                 pub array: [#field_type; #array_size],
@@ -215,7 +220,7 @@ fn generate_object_definition(obj: &ObjectDefinition) -> Result<TokenStream, Com
             highest_sub_index = array_size as u8;
         }
         Object::Var(def) => {
-            let (field_type, _) = get_storage_type(def.data_type);
+            let field_type = get_storage_type(def.data_type);
             field_tokens.extend(quote! {
                 pub value: #field_type,
             });
@@ -245,10 +250,12 @@ fn default_default_value(data_type: DCDataType) -> Option<DefaultValue> {
         DCDataType::Boolean
         | DCDataType::Int8
         | DCDataType::Int16
+        | DCDataType::Int24
         | DCDataType::Int32
         | DCDataType::Int64
         | DCDataType::UInt8
         | DCDataType::UInt16
+        | DCDataType::UInt24
         | DCDataType::UInt32 => Some(DefaultValue::Integer(0)),
         DCDataType::UInt64 => Some(DefaultValue::Integer(0)),
         DCDataType::Real32 | DCDataType::Real64 => Some(DefaultValue::Float(0.0)),
@@ -309,17 +316,19 @@ fn get_default_tokens(
             match data_type {
                 DCDataType::Boolean => {
                     if *i != 0 {
-                        Ok(quote!(ScalarField<bool>::new(true)))
+                        Ok(quote!(ScalarField::<bool>::new(true)))
                     } else {
-                        Ok(quote!(ScalarField<bool>::new(false)))
+                        Ok(quote!(ScalarField::<bool>::new(false)))
                     }
                 }
                 DCDataType::Int8 => Ok(quote!(ScalarField::<i8>::new(#i as i8))),
                 DCDataType::Int16 => Ok(quote!(ScalarField::<i16>::new(#i as i16))),
+                DCDataType::Int24 => Ok(quote!(ScalarField::<i24>::new(i24::new(#i as i32)))),
                 DCDataType::Int32 => Ok(quote!(ScalarField::<i32>::new(#i as i32))),
                 DCDataType::Int64 => Ok(quote!(ScalarField::<i64>::new(#i))),
                 DCDataType::UInt8 => Ok(quote!(ScalarField::<u8>::new(#i as u8))),
                 DCDataType::UInt16 => Ok(quote!(ScalarField::<u16>::new(#i as u16))),
+                DCDataType::UInt24 => Ok(quote!(ScalarField::<u24>::new(u24::new(#i as u32)))),
                 DCDataType::UInt32 => Ok(quote!(ScalarField::<u32>::new(#i as u32))),
                 DCDataType::UInt64 => Ok(quote!(ScalarField::<u64>::new(#i as u64))),
                 DCDataType::Real32 => Ok(quote!(ScalarField::<f32>::new(#i as f32))),
@@ -782,7 +791,7 @@ pub fn device_config_to_tokens(dev: &DeviceConfig) -> Result<TokenStream, Compil
         } else {
             let object_code = object_code_to_tokens(obj.object_code());
             object_instantiations.extend(quote! {
-                pub static #inst_name: CallbackObject = CallbackObject::new(&OD_TABLE, #object_code);
+                pub static #inst_name: CallbackObject = CallbackObject::new(#object_code);
             });
             table_entries.extend(quote! {
                 ODEntry {
@@ -825,7 +834,7 @@ pub fn device_config_to_tokens(dev: &DeviceConfig) -> Result<TokenStream, Compil
             NullTermByteField,
         };
         #[allow(unused_imports)]
-        use zencan_node::common::{TimeOfDay, TimeDifference};
+        use zencan_node::common::{i24, u24, TimeOfDay, TimeDifference};
         #[allow(unused_imports)]
         use zencan_node::SDO_BUFFER_SIZE;
         #[allow(unused_imports)]

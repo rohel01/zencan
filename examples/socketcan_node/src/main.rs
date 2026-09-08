@@ -1,3 +1,4 @@
+#![cfg_attr(not(target_os = "linux"), allow(unused_imports, dead_code))]
 use std::{
     convert::Infallible,
     io::Write as _,
@@ -7,7 +8,7 @@ use std::{
 
 use clap::Parser;
 use tokio::time::timeout;
-use zencan_node::Node;
+use zencan_node::{common::messages::SyncObject, Node};
 use zencan_node::{
     common::{
         traits::{AsyncCanReceiver, AsyncCanSender},
@@ -16,6 +17,7 @@ use zencan_node::{
     Callbacks,
 };
 
+#[cfg(target_os = "linux")]
 use zencan_node::open_socketcan;
 
 mod zencan {
@@ -33,6 +35,12 @@ struct Args {
     serial: Option<u32>,
 }
 
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    println!("socketcan_node can only run on linux");
+}
+
+#[cfg(target_os = "linux")]
 #[tokio::main]
 async fn main() {
     // Initialize the logger
@@ -83,14 +91,16 @@ async fn main() {
         }
     };
 
+    let mut sync_received = |sync_object: SyncObject| {
+        log::info!("Sync received with count {:?}!", sync_object.count);
+    };
+
     let callbacks = Callbacks {
-        store_node_config: None,
         store_objects: Some(&mut store_objects),
         reset_app: Some(&mut reset_app),
         reset_comms: Some(&mut reset_comms),
-        enter_operational: None,
-        enter_stopped: None,
-        enter_preoperational: None,
+        sync_received: Some(&mut sync_received),
+        ..Default::default()
     };
 
     let mut node = Node::new(
@@ -105,10 +115,10 @@ async fn main() {
 
     // Node requires callbacks be static, so use Box::leak to make static ref from closure on heap
     let process_notify = Box::leak(Box::new(tokio::sync::Notify::new()));
-    let notify_cb = Box::leak(Box::new(|| {
+    let process_notify_cb = Box::leak(Box::new(|| {
         process_notify.notify_one();
     }));
-    zencan::NODE_MBOX.set_process_notify_callback(notify_cb);
+    zencan::NODE_MBOX.set_process_notify_callback(process_notify_cb);
 
     // Spawn a task to receive messages
     tokio::spawn(async move {

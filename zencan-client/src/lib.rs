@@ -29,6 +29,7 @@ mod sdo_client;
 pub use zencan_common as common;
 
 pub use bus_manager::BusManager;
+#[cfg(all(feature = "socketcan", target_os = "linux"))]
 pub use common::open_socketcan;
 pub use lss_master::{LssError, LssMaster};
 pub use sdo_client::{RawAbortCode, SdoClient, SdoClientError};

@@ -2,7 +2,9 @@
 
 use core::cell::UnsafeCell;
 
-use zencan_common::{sdo::AbortCode, AtomicCell, TimeDifference, TimeOfDay};
+use zencan_common::{
+    i24, sdo::AbortCode, traits::ReadSize, u24, AtomicCell, TimeDifference, TimeOfDay,
+};
 
 /// Allow transparent byte level access to a sub object
 pub trait SubObjectAccess: Sync + Send {
@@ -151,7 +153,7 @@ macro_rules! impl_scalar_field {
             }
 
             fn read_size(&self) -> usize {
-                core::mem::size_of::<$rust_type>()
+                <$rust_type as ReadSize>::READ_SIZE
             }
 
             fn write(&self, data: &[u8]) -> Result<(), AbortCode> {
@@ -171,14 +173,25 @@ macro_rules! impl_scalar_field {
 
 impl_scalar_field!(u8);
 impl_scalar_field!(u16);
+impl_scalar_field!(u24);
 impl_scalar_field!(u32);
 impl_scalar_field!(u64);
 impl_scalar_field!(i8);
 impl_scalar_field!(i16);
+impl_scalar_field!(i24);
 impl_scalar_field!(i32);
 impl_scalar_field!(i64);
 impl_scalar_field!(f32);
 impl_scalar_field!(f64);
+
+impl ScalarField<bool> {
+    /// Create a new field
+    pub const fn new(value: bool) -> Self {
+        Self {
+            value: AtomicCell::new(value),
+        }
+    }
+}
 
 // bool doesn't support from_le_bytes so it needs a special implementation
 impl SubObjectAccess for ScalarField<bool> {
@@ -653,7 +666,7 @@ mod tests {
                 1 => Some((SubInfo::new_u32().rw_access(), &self.val1)),
                 2 => Some((SubInfo::new_u8().rw_access(), &self.val2)),
                 3 => Some((
-                    SubInfo::new_visibile_str(self.val3.len()).rw_access(),
+                    SubInfo::new_visible_str(self.val3.len()).rw_access(),
                     &self.val3,
                 )),
                 _ => None,
@@ -694,8 +707,6 @@ mod tests {
     fn sub_read_test_helper(field: &dyn SubObjectAccess, expected_bytes: &[u8]) {
         let n = expected_bytes.len();
 
-        assert!(n > 2, "Expected bytes cannot be shorted than 2 bytes");
-
         assert_eq!(n, field.read_size());
 
         // Do an exact length read from offset 0
@@ -710,25 +721,135 @@ mod tests {
         assert_eq!(n, read_size);
         assert_eq!(expected_bytes, &read_buf[0..n]);
 
-        // Do a long read with offset
-        let mut read_buf = vec![0xffu8; n + 10];
-        let read_size = field.read(2, &mut read_buf).unwrap();
-        assert_eq!(n - 2, read_size);
-        assert_eq!(&expected_bytes[2..], &read_buf[0..n - 2]);
+        if n > 2 {
+            // Do a long read with offset
+            let mut read_buf = vec![0xffu8; n + 10];
+            let read_size = field.read(2, &mut read_buf).unwrap();
+            assert_eq!(n - 2, read_size);
+            assert_eq!(&expected_bytes[2..], &read_buf[0..n - 2]);
 
-        // Do a short read with offset
-        let mut read_buf = vec![0xffu8; n - 2];
-        let read_size = field.read(1, &mut read_buf).unwrap();
-        assert_eq!(n - 2, read_size);
-        assert_eq!(expected_bytes[1..n - 1], read_buf);
+            // Do a short read with offset
+            let mut read_buf = vec![0xffu8; n - 2];
+            let read_size = field.read(1, &mut read_buf).unwrap();
+            assert_eq!(n - 2, read_size);
+            assert_eq!(expected_bytes[1..n - 1], read_buf);
+        } else {
+            let mut read_buf = vec![0xffu8; n + 10];
+            let read_size = field.read(1, &mut read_buf).unwrap();
+            assert_eq!(n.saturating_sub(1), read_size);
+            assert_eq!(&expected_bytes[1..], &read_buf[0..read_size]);
+        }
     }
 
     #[test]
-    fn test_scalar_field() {
+    fn test_scalar_field_bool() {
+        let field = ScalarField::<bool>::default();
+        field.store(true);
+        assert_eq!(1, field.read_size());
+
+        let mut read_buf = [0xffu8; 1];
+        let read_size = field.read(0, &mut read_buf).unwrap();
+        assert_eq!(1, read_size);
+        assert_eq!([1], read_buf);
+    }
+
+    #[test]
+    fn test_scalar_field_u8() {
+        let field = ScalarField::<u8>::new(42u8);
+        let exp_bytes = 42u8.to_le_bytes();
+        sub_read_test_helper(&field, &exp_bytes);
+    }
+
+    #[test]
+    fn test_scalar_field_u32() {
         let field = ScalarField::<u32>::new(42u32);
-
         let exp_bytes = 42u32.to_le_bytes();
+        sub_read_test_helper(&field, &exp_bytes);
+    }
 
+    #[test]
+    fn test_scalar_field_u16() {
+        let field = ScalarField::<u16>::new(42u16);
+        let exp_bytes = 42u16.to_le_bytes();
+        sub_read_test_helper(&field, &exp_bytes);
+    }
+
+    #[test]
+    fn test_scalar_field_u24() {
+        let field = ScalarField::<u24>::new(u24::new(42));
+        let exp_bytes = u24::new(42).to_le_bytes();
+        sub_read_test_helper(&field, &exp_bytes);
+    }
+
+    #[test]
+    fn test_scalar_field_u64() {
+        let field = ScalarField::<u64>::new(42u64);
+        let exp_bytes = 42u64.to_le_bytes();
+        sub_read_test_helper(&field, &exp_bytes);
+    }
+
+    #[test]
+    fn test_scalar_field_i8() {
+        let field = ScalarField::<i8>::new(-42i8);
+        let exp_bytes = (-42i8).to_le_bytes();
+        sub_read_test_helper(&field, &exp_bytes);
+    }
+
+    #[test]
+    fn test_scalar_field_i16() {
+        let field = ScalarField::<i16>::new(-42i16);
+        let exp_bytes = (-42i16).to_le_bytes();
+        sub_read_test_helper(&field, &exp_bytes);
+    }
+
+    #[test]
+    fn test_scalar_field_i24() {
+        let field = ScalarField::<i24>::new(i24::new(-42));
+        let exp_bytes = i24::new(-42).to_le_bytes();
+        sub_read_test_helper(&field, &exp_bytes);
+    }
+
+    #[test]
+    fn test_scalar_field_i32() {
+        let field = ScalarField::<i32>::new(-42i32);
+        let exp_bytes = (-42i32).to_le_bytes();
+        sub_read_test_helper(&field, &exp_bytes);
+    }
+
+    #[test]
+    fn test_scalar_field_i64() {
+        let field = ScalarField::<i64>::new(-42i64);
+        let exp_bytes = (-42i64).to_le_bytes();
+        sub_read_test_helper(&field, &exp_bytes);
+    }
+
+    #[test]
+    fn test_scalar_field_f32() {
+        let field = ScalarField::<f32>::new(42.5f32);
+        let exp_bytes = 42.5f32.to_le_bytes();
+        sub_read_test_helper(&field, &exp_bytes);
+    }
+
+    #[test]
+    fn test_scalar_field_f64() {
+        let field = ScalarField::<f64>::new(42.5f64);
+        let exp_bytes = 42.5f64.to_le_bytes();
+        sub_read_test_helper(&field, &exp_bytes);
+    }
+
+    #[test]
+    fn test_scalar_field_time_difference() {
+        let value = TimeDifference::new(42, 1234);
+        let field = ScalarField::<TimeDifference>::new(value);
+        let exp_bytes = value.to_le_bytes();
+        sub_read_test_helper(&field, &exp_bytes);
+    }
+
+    #[test]
+    fn test_scalar_field_time_of_day() {
+        let value = TimeOfDay::new(42, 1234);
+        let field = ScalarField::<TimeOfDay>::new(value);
+        let exp_bytes = value.to_le_bytes();
         sub_read_test_helper(&field, &exp_bytes);
     }
 

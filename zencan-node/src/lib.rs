@@ -107,11 +107,7 @@
 //! let callbacks = Callbacks {
 //!     store_node_config: Some(store_node_config),
 //!     store_objects: Some(store_objects),
-//!     reset_app: None,
-//!     reset_comms: None,
-//!     enter_operational: None,
-//!     enter_stopped: None,
-//!     enter_preoperational: None,
+//!     ..Default::default()
 //! };
 //!
 //!
@@ -216,8 +212,8 @@ pub use embedded_io;
 pub use zencan_common as common;
 
 pub use bootloader::{BootloaderInfo, BootloaderSection, BootloaderSectionCallbacks};
-#[cfg(feature = "socketcan")]
-#[cfg_attr(docsrs, doc(cfg(feature = "socketcan")))]
+#[cfg(all(feature = "socketcan", target_os = "linux"))]
+#[cfg_attr(docsrs, doc(all(feature = "socketcan", target_os = "linux")))]
 pub use common::open_socketcan;
 pub use node::{Callbacks, Node};
 pub use node_mbox::NodeMbox;

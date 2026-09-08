@@ -2,14 +2,30 @@
 
 Human-friendly documentation of releases and what's changed in them for the zencan-node crate.
 
-## Unreleased
+## v0.0.4 - 2026-05-08
+
+### Added
+
+- `sync_received` callback (thanks to @rohel1)
+- Support for i24 and u24 data types (thanks to @rohel1)
+
+### Changed
+
+- embedded_io bumped from 0.6 to 0.7
+
+### Added
+
+- `sync_received` node callback added (thanks to rohel01)
 
 ### Fixed
 
+- Bug sending TPDO on SYNC received (PR #66)
 - Unused code warning when num_tdpos or num_rpdos is 0
 - TPDO bug where event flags were never cleared causing all TPDOs to be transmitted when any event
   was set
 - PDO objects were unwritable when reset_app/reset_comms callback is called
+- Objects with `application_callback` failed to compile
+- CallbackObject provided no method for registering a callback
 
 ## v0.0.3 - 2026-01-20
 

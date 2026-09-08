@@ -58,11 +58,12 @@ use zencan_common::{
 ///
 /// Since we do not yet support CAN-FD, or sub-byte mapping, it's not possible to map more than 8
 /// objects to a single PDO
-const N_MAPPING_PARAMS: usize = 8;
+pub const N_MAPPING_PARAMS: usize = 8;
 
+#[allow(missing_debug_implementations)]
 #[derive(Clone, Copy)]
 /// Data structure for storing a PDO object mapping
-struct MappingEntry<'a> {
+pub struct MappingEntry<'a> {
     /// A reference to the object which is mapped
     pub object: &'a ODEntry<'a>,
     /// The index of the sub object mapped
@@ -192,15 +193,15 @@ pub struct Pdo<'a> {
     /// Tracks the number of sync signals since this was last sent or received
     sync_counter: AtomicCell<u8>,
     /// The last received data value for an RPDO, or ready to transmit data for a TPDO
-    pub buffered_value: AtomicCell<Option<[u8; 8]>>,
+    pub buffered_value: AtomicCell<Option<heapless::Vec<u8, 8>>>,
     /// Indicates how many of the values in mapping_params are valid
     ///
     /// This represents sub0 for the mapping object
-    valid_maps: AtomicCell<u8>,
+    pub valid_maps: AtomicCell<u8>,
     /// The mapping parameters
     ///
     /// These specify which objects are
-    mapping_params: [AtomicCell<Option<MappingEntry<'a>>>; N_MAPPING_PARAMS],
+    pub mapping_params: [AtomicCell<Option<MappingEntry<'a>>>; N_MAPPING_PARAMS],
     /// System default values for this PDO
     defaults: Option<&'a PdoDefaults<'a>>,
 }
@@ -297,7 +298,26 @@ impl<'a> Pdo<'a> {
             // For now, send every sync
             true
         } else if transmission_type <= 240 {
-            let cnt = self.sync_counter.fetch_add(1) + 1;
+            // Atomically update this PDO's sync counter. If it has
+            // reached the transmit threshold ("transmission_type"),
+            // then reset it to zero.
+            let r = self.sync_counter.fetch_update(|old| {
+                let new = old + 1;
+                if new >= transmission_type {
+                    Some(0)
+                } else {
+                    Some(new)
+                }
+            });
+
+            // We don't care if the update worked or not (because there's
+            // nothing we can do about it). Just use whatever the old
+            // value was.
+            let cnt = match r {
+                Ok(old) => old,
+                Err(old) => old,
+            } + 1;
+
             cnt == transmission_type
         } else {
             false
@@ -383,6 +403,7 @@ impl<'a> Pdo<'a> {
             }
             // validity of the mappings must be validated during write, so that error here is not
             // possible
+
             param
                 .object
                 .data
@@ -392,7 +413,9 @@ impl<'a> Pdo<'a> {
         }
         // If there is an old value here which has not been sent yet, replace it with the latest
         // Data will be sent by mbox in message handling thread.
-        self.buffered_value.store(Some(data));
+        // Unwrap safety: ensured above that data cannot be longer than 8 bytes
+        self.buffered_value
+            .store(Some(heapless::Vec::from_slice(&data[0..offset]).unwrap()));
     }
 
     /// Lookup a PDO mapped object and create a MappingEntry if it is valid

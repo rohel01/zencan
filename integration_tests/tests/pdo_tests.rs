@@ -1,20 +1,27 @@
 //! Test node PDO operations
 //!
 
-use std::time::Duration;
+use std::{
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use integration_tests::{object_dict1, prelude::*};
 use serial_test::serial;
 use tokio::time::timeout;
 use zencan_client::nmt_master::NmtMaster;
 use zencan_common::{
+    i24,
     messages::{CanId, CanMessage, SyncObject},
     node_configuration::PdoConfig,
     pdo::PdoMapping,
     traits::{AsyncCanReceiver, AsyncCanSender},
-    NodeId,
+    u24, NodeId,
 };
-use zencan_node::object_dict::ObjectAccess as _;
+use zencan_node::{object_dict::ObjectAccess as _, pdo::MappingEntry};
 
 #[serial]
 #[tokio::test]
@@ -24,7 +31,33 @@ async fn test_rpdo_assignment() {
 
     let mut bus = SimBus::new();
     bus.add_node(&NODE_MBOX);
-    let callbacks = Callbacks::new();
+
+    let rpdo_cb_counter: Arc<AtomicU8> = Arc::new(AtomicU8::new(0));
+    let rpdo_cb_counter_clone = rpdo_cb_counter.clone();
+    let mut rpdo_received = move |slot: u8, mappings: &[MappingEntry<'_>]| {
+        rpdo_cb_counter_clone.fetch_add(1, Ordering::Relaxed);
+
+        assert_eq!(slot, 0);
+
+        assert_eq!(mappings.len(), 2);
+
+        let mapping = &mappings[0];
+        assert_eq!(mapping.object.index, 0x2000);
+        assert_eq!(mapping.sub, 1);
+        assert_eq!(mapping.length, 4);
+        let mapping = &mappings[1];
+        assert_eq!(mapping.object.index, 0x300C);
+        assert_eq!(mapping.sub, 12);
+        assert_eq!(mapping.length, 3);
+
+        assert_eq!(OBJECT2000.read_u32(1), Ok(500));
+        assert_eq!(OBJECT300C.read_u24(12), Ok(u24::new(0x010203)));
+    };
+
+    let callbacks = Callbacks {
+        pdo_received: Some(&mut rpdo_received),
+        ..Default::default()
+    };
     let mut node = Node::new(
         NodeId::new(NODE_ID).unwrap(),
         callbacks,
@@ -44,35 +77,65 @@ async fn test_rpdo_assignment() {
 
     let test_task = move |mut ctx: TestContext| async move {
         // Readback the largest sub index
-        assert_eq!(2, client.upload_u8(0x1400, 0).await.unwrap());
+        assert_eq!(2, client.read_u8(0x1400, 0).await.unwrap());
+
+        // Check initial value of RPDO1 cob_id
+        assert_eq!(0x300, client.read_u32(0x1400, 1).await.unwrap());
 
         // Set COB-ID and readback
         // Invalid bit cleared, and ID == 0x201.
         let cob_id_word: u32 = 0x201;
-        client.download_u32(0x1400, 1, cob_id_word).await.unwrap();
+        client.write_u32(0x1400, 1, cob_id_word).await.unwrap();
 
-        let readback_cob_id_word = client.upload_u32(0x1400, 1).await.unwrap();
+        let readback_cob_id_word = client.read_u32(0x1400, 1).await.unwrap();
         assert_eq!(cob_id_word, readback_cob_id_word);
 
-        // Set RPDO1 to map to object 0x2000, subindex 1, length 32 bits
+        // Check initial values of RPDO0 mappings
+        // These are set to 0x2000sub2 and 0x300Csub12 by default in example1.toml
+        assert_eq!(2, client.read_u8(0x1600, 0).await.unwrap());
+        let default_mapping_entry_1: u32 = (0x2000 << 16) | (2 << 8) | 32;
+        let default_mapping_entry_2: u32 = (0x300C << 16) | (12 << 8) | 24;
+        assert_eq!(
+            default_mapping_entry_1,
+            client.read_u32(0x1600, 1).await.unwrap()
+        );
+        assert_eq!(
+            default_mapping_entry_2,
+            client.read_u32(0x1600, 2).await.unwrap()
+        );
+        assert_eq!(u24::new(0), client.read_u24(0x300C, 12).await.unwrap());
+
+        // Modify RPDO0 to map to object 0x2000, subindex 1, length 32 bits
         let mapping_entry: u32 = (0x2000 << 16) | (1 << 8) | 32;
-        client.download_u32(0x1600, 1, mapping_entry).await.unwrap();
-        // Set the number of valid mappings
-        client.download_u8(0x1600, 0, 1).await.unwrap();
+        client.write_u32(0x1600, 1, mapping_entry).await.unwrap();
+        // // Set the number of valid mappings
+        client.write_u8(0x1600, 0, 2).await.unwrap();
 
         // Put in operational mode
         nmt.nmt_start(0).await.unwrap();
 
         // Now send a PDO message and it should update the mapped object
+        let mut pdo_data = [0u8; 8];
+        // First 4 bytes are 0x2000sub2
+        pdo_data[0..4].copy_from_slice(&500u32.to_le_bytes());
+        // Next 3 bytes are 0x300Csub12
+        pdo_data[4..7].copy_from_slice(&u24::new(0x010203).to_le_bytes());
         pdo_sender
-            .send(CanMessage::new(CanId::Std(0x201), &500u32.to_le_bytes()))
+            .send(CanMessage::new(CanId::Std(0x201), &pdo_data))
             .await
             .unwrap();
 
         // Delay a bit, because node process() method has to be called for PDO to apply
         ctx.wait_for_process(1).await;
         // Readback the mapped object; the PDO message above should have updated it
-        assert_eq!(500, client.upload_u32(0x2000, 1).await.unwrap());
+        // These are also checked by the RPDO callback, but we confirm we also can read them via SDO
+        assert_eq!(500, client.read_u32(0x2000, 1).await.unwrap());
+        assert_eq!(
+            u24::new(0x010203),
+            client.read_u24(0x300C, 12).await.unwrap()
+        );
+        // Check callback was called at least once
+        assert_eq!(rpdo_cb_counter.load(Ordering::Relaxed), 1);
     };
 
     test_with_background_process(&mut [&mut node], &mut bus, test_task).await;
@@ -107,7 +170,7 @@ async fn test_tpdo_assignment() {
     let mut nmt = NmtMaster::new(bus.new_sender(), bus.new_receiver());
 
     let mut sender = bus.new_sender();
-    let test_task = move |_ctx| async move {
+    let test_task = move |mut ctx: TestContext| async move {
         // Set the TPDO COB ID
         client
             .download(TPDO_COMM1_ID, PDO_COMM_COB_SUBID, &0x181u32.to_le_bytes())
@@ -123,17 +186,20 @@ async fn test_tpdo_assignment() {
             .await
             .unwrap();
 
-        client.download_u32(0x2000, 1, 222).await.unwrap();
-        client.download_u32(0x2001, 1, 333).await.unwrap();
+        client.write_u32(0x2001, 1, 333).await.unwrap();
+        client
+            .write_i24(0x300C, 11, i24::new(-65432))
+            .await
+            .unwrap();
 
-        // Set the TPDO mapping to 0x2000, subindex 1, length 32 bits
-        let mapping_entry: u32 = (0x2000 << 16) | (1 << 8) | 32;
-        client.download_u32(0x1A00, 1, mapping_entry).await.unwrap();
-        // Set the second TPDO mapping entry to 0x2001, subindex 1, length 32 bits
+        // Set the TPDO mapping to 0x2001, subindex 1, length 32 bits
         let mapping_entry: u32 = (0x2001 << 16) | (1 << 8) | 32;
-        client.download_u32(0x1A00, 2, mapping_entry).await.unwrap();
+        client.write_u32(0x1A00, 1, mapping_entry).await.unwrap();
+        // Set the second TPDO mapping entry to 0x300C, subindex 11, length 24 bits
+        let mapping_entry: u32 = (0x300C << 16) | (11 << 8) | 24;
+        client.write_u32(0x1A00, 2, mapping_entry).await.unwrap();
         // Set the number of valid mappings
-        client.download_u8(0x1A00, 0, 2).await.unwrap();
+        client.write_u8(0x1A00, 0, 2).await.unwrap();
 
         // Node has to be in Operating mode to send PDOs
         nmt.nmt_start(0).await.unwrap();
@@ -144,22 +210,25 @@ async fn test_tpdo_assignment() {
         sender.send(sync_msg).await.unwrap();
 
         // We expect to receive the sync message just sent first
-        let rx_sync_msg = timeout(Duration::from_millis(50), rx.recv())
+        let rx_sync_msg = timeout(Duration::from_millis(1), rx.recv())
             .await
             .expect("Expected SYNC message, no CAN message received")
             .expect("recv returned an error");
         assert_eq!(sync_msg.id, rx_sync_msg.id);
+        ctx.wait_for_process(1).await;
         // Then expect a PDO message
-        let msg = timeout(Duration::from_millis(50), rx.recv())
+        let msg = timeout(Duration::from_millis(1), rx.recv())
             .await
             .expect("Expected PDO, no CAN message received")
             .expect("recv returned an error");
 
         assert_eq!(CanId::std(0x181), msg.id);
+        assert_eq!(7, msg.dlc);
+        assert_eq!(7, msg.data().len());
         let field1 = u32::from_le_bytes(msg.data[0..4].try_into().unwrap());
-        let field2 = u32::from_le_bytes(msg.data[4..8].try_into().unwrap());
-        assert_eq!(222, field1);
-        assert_eq!(333, field2);
+        let field2 = i24::from_le_bytes(msg.data[4..7].try_into().unwrap());
+        assert_eq!(333, field1);
+        assert_eq!(i24::new(-65432), field2);
     };
 
     test_with_background_process(&mut [&mut node], &mut bus, test_task).await;
@@ -256,9 +325,9 @@ async fn test_tpdo_event_flags() {
             .unwrap();
 
         // Set some known values into the mapped application objects
-        client.download_u32(0x2000, 1, 222).await.unwrap();
-        client.download_u32(0x2001, 1, 333).await.unwrap();
-        client.download_u32(0x3000, 0, 444).await.unwrap();
+        client.write_u32(0x2000, 1, 222).await.unwrap();
+        client.write_u32(0x2001, 1, 333).await.unwrap();
+        client.write_u32(0x3000, 0, 444).await.unwrap();
 
         // Node has to be in Operating mode to send PDOs
         nmt.nmt_start(0).await.unwrap();
@@ -311,6 +380,230 @@ async fn test_tpdo_event_flags() {
 
 #[serial]
 #[tokio::test]
+async fn test_tpdo_sync_initiated_transmission() {
+    use object_dict1::*;
+    const NODE_ID: u8 = 1;
+
+    let mut bus = SimBus::new();
+    bus.add_node(&NODE_MBOX);
+    let callbacks = Callbacks::new();
+    let mut node = Node::new(
+        NodeId::new(NODE_ID).unwrap(),
+        callbacks,
+        &NODE_MBOX,
+        &NODE_STATE,
+        &OD_TABLE,
+    );
+    let mut client = get_sdo_client(&mut bus, NODE_ID);
+
+    let _logger = BusLogger::new(bus.new_receiver());
+
+    // Set COB-ID
+    const TPDO_COMM1_ID: u16 = 0x1800;
+    const PDO_COMM_COB_SUBID: u8 = 1;
+    const PDO_COMM_TRANSMISSION_TYPE_SUBID: u8 = 2;
+
+    let mut rx = bus.new_receiver();
+    let mut sender = bus.new_sender();
+
+    let mut nmt = NmtMaster::new(bus.new_sender(), bus.new_receiver());
+
+    // Helper function: Send the next Sync, read it back, wait for the
+    // test context to process it.
+    async fn sync(
+        sync_counter: &mut u8,
+        sender: &mut SimBusSender<'_>,
+        rx: &mut SimBusReceiver,
+        ctx: &mut TestContext,
+    ) {
+        *sync_counter += 1_;
+        let sync_msg = SyncObject::new(Some(*sync_counter)).into();
+        sender.send(sync_msg).await.unwrap();
+        let msg = rx
+            .try_recv()
+            .expect("no message received after sending Sync {sync_counter}");
+        assert_eq!(CanId::std(0x80), msg.id);
+        ctx.wait_for_process(1).await;
+    }
+
+    let test_task = move |mut ctx: TestContext| async move {
+        // Configure TPDO0 to send data
+        client
+            .configure_tpdo(
+                0,
+                &PdoConfig {
+                    cob_id: CanId::std(0x181),
+                    enabled: true,
+                    rtr_disabled: false,
+                    mappings: vec![
+                        PdoMapping {
+                            index: 0x2000,
+                            sub: 1,
+                            size: 32,
+                        },
+                        PdoMapping {
+                            index: 0x2001,
+                            sub: 1,
+                            size: 32,
+                        },
+                    ],
+                    transmission_type: 2,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Enable TPDO1
+        client
+            .configure_tpdo(
+                1,
+                &PdoConfig {
+                    cob_id: CanId::std(0x182),
+                    enabled: true,
+                    rtr_disabled: false,
+                    mappings: vec![PdoMapping {
+                        index: 0x3000,
+                        sub: 0,
+                        size: 32,
+                    }],
+                    transmission_type: 3,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Set the TPDO COB ID
+        client
+            .download(TPDO_COMM1_ID, PDO_COMM_COB_SUBID, &0x181u32.to_le_bytes())
+            .await
+            .unwrap();
+        // Set to asynchronous transmission
+        client
+            .download(
+                TPDO_COMM1_ID,
+                PDO_COMM_TRANSMISSION_TYPE_SUBID,
+                &2u8.to_le_bytes(),
+            )
+            .await
+            .unwrap();
+
+        // Set some known values into the mapped application objects
+        client.write_u32(0x2000, 1, 222).await.unwrap();
+        client.write_u32(0x2001, 1, 333).await.unwrap();
+        client.write_u32(0x3000, 0, 444).await.unwrap();
+
+        // Node has to be in Operating mode to send PDOs
+        nmt.nmt_start(0).await.unwrap();
+
+        rx.flush();
+
+        ctx.wait_for_process(1).await;
+
+        // No messages in queue
+        assert!(rx.try_recv().is_none());
+
+        let mut sync_counter = 0_u8;
+
+        // Send first Sync, read it back.
+        sync(&mut sync_counter, &mut sender, &mut rx, &mut ctx).await;
+
+        // Nothing else in queue yet
+        assert!(rx.try_recv().is_none());
+
+        // Send second Sync, read it back.
+        sync(&mut sync_counter, &mut sender, &mut rx, &mut ctx).await;
+
+        let msg = rx.try_recv().expect("No message received after TPDO event");
+        println!("received after sync {sync_counter}: {msg:#x?}");
+        assert_eq!(CanId::std(0x181), msg.id);
+        assert_eq!(8, msg.data().len());
+        assert_eq!(
+            222,
+            u32::from_le_bytes(msg.data()[0..4].try_into().unwrap())
+        );
+        assert_eq!(
+            333,
+            u32::from_le_bytes(msg.data()[4..8].try_into().unwrap())
+        );
+        // should only have gotten one message
+        assert!(rx.try_recv().is_none());
+
+        // Send third Sync, read it back.
+        sync(&mut sync_counter, &mut sender, &mut rx, &mut ctx).await;
+
+        let msg = rx.try_recv().expect("No message received after TPDO event");
+        println!("received after sync {sync_counter}: {msg:#x?}");
+        assert_eq!(CanId::std(0x182), msg.id);
+        assert_eq!(4, msg.data().len());
+        assert_eq!(
+            444,
+            u32::from_le_bytes(msg.data()[0..4].try_into().unwrap())
+        );
+        // should only have gotten one message
+        assert!(rx.try_recv().is_none());
+
+        // Send fourth Sync, read it back.
+        sync(&mut sync_counter, &mut sender, &mut rx, &mut ctx).await;
+
+        let msg = rx.try_recv().expect("No message received after TPDO event");
+        println!("received after sync {sync_counter}: {msg:#x?}");
+        assert_eq!(CanId::std(0x181), msg.id);
+        assert_eq!(
+            222,
+            u32::from_le_bytes(msg.data()[0..4].try_into().unwrap())
+        );
+        assert_eq!(
+            333,
+            u32::from_le_bytes(msg.data()[4..8].try_into().unwrap())
+        );
+        // should only have gotten one message
+        assert!(rx.try_recv().is_none());
+
+        // Send fifth Sync, read it back.
+        sync(&mut sync_counter, &mut sender, &mut rx, &mut ctx).await;
+
+        // Nothing else in queue yet
+        assert!(rx.try_recv().is_none());
+
+        // Send sixth Sync, read it back.
+        sync(&mut sync_counter, &mut sender, &mut rx, &mut ctx).await;
+
+        let msg = rx.try_recv().expect("No message received after TPDO event");
+        println!("received after sync {sync_counter}: {msg:#x?}");
+        assert_eq!(CanId::std(0x181), msg.id);
+        assert_eq!(
+            222,
+            u32::from_le_bytes(msg.data()[0..4].try_into().unwrap())
+        );
+        assert_eq!(
+            333,
+            u32::from_le_bytes(msg.data()[4..8].try_into().unwrap())
+        );
+
+        let msg = rx.try_recv().expect("No message received after TPDO event");
+        println!("received after sync {sync_counter}: {msg:#x?}");
+        assert_eq!(CanId::std(0x182), msg.id);
+        assert_eq!(4, msg.data().len());
+        assert_eq!(
+            444,
+            u32::from_le_bytes(msg.data()[0..4].try_into().unwrap())
+        );
+
+        // Nothing else in queue yet
+        assert!(rx.try_recv().is_none());
+
+        // Send seventh Sync, read it back.
+        sync(&mut sync_counter, &mut sender, &mut rx, &mut ctx).await;
+
+        // Nothing else in queue yet
+        assert!(rx.try_recv().is_none());
+    };
+
+    test_with_background_process(&mut [&mut node], &mut bus, test_task).await;
+}
+
+#[serial]
+#[tokio::test]
 async fn test_pdo_configuration() {
     use object_dict1::*;
     const NODE_ID: u8 = 1;
@@ -352,17 +645,17 @@ async fn test_pdo_configuration() {
         client.configure_tpdo(0, &config).await?;
 
         // Check that the expected objects got the expected values
-        assert_eq!(2, client.upload_u8(0x1A00, 0).await?);
+        assert_eq!(2, client.read_u8(0x1A00, 0).await?);
         assert_eq!(
             (0x2000 << 16) | 1 << 8 | 32,
-            client.upload_u32(0x1A00, 1).await?
+            client.read_u32(0x1A00, 1).await?
         );
         assert_eq!(
             (0x2001 << 16) | 1 << 8 | 32,
-            client.upload_u32(0x1A00, 2).await?
+            client.read_u32(0x1A00, 2).await?
         );
-        assert_eq!(254, client.upload_u8(0x1800, 2).await?);
-        assert_eq!(0x301, client.upload_u32(0x1800, 1).await?);
+        assert_eq!(254, client.read_u8(0x1800, 2).await?);
+        assert_eq!(0x301, client.read_u32(0x1800, 1).await?);
 
         Ok::<_, Box<dyn std::error::Error>>(())
     };
@@ -409,10 +702,13 @@ async fn test_pdo_defaults() {
         assert_eq!(true, rpdo0_cfg.enabled);
         assert_eq!(CanId::std(0x300), rpdo0_cfg.cob_id);
         assert_eq!(254, rpdo0_cfg.transmission_type);
-        assert_eq!(1, rpdo0_cfg.mappings.len());
+        assert_eq!(2, rpdo0_cfg.mappings.len());
         assert_eq!(0x2000, rpdo0_cfg.mappings[0].index);
         assert_eq!(2u8, rpdo0_cfg.mappings[0].sub);
         assert_eq!(32, rpdo0_cfg.mappings[0].size);
+        assert_eq!(0x300C, rpdo0_cfg.mappings[1].index);
+        assert_eq!(12, rpdo0_cfg.mappings[1].sub);
+        assert_eq!(24, rpdo0_cfg.mappings[1].size);
     };
 
     test_with_background_process(&mut [&mut node], &mut bus, test_task).await;

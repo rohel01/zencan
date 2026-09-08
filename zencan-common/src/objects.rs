@@ -68,6 +68,22 @@ pub enum AccessType {
     Const,
 }
 
+impl TryFrom<&str> for AccessType {
+    type Error = ();
+
+    /// Attempts to create `AccessType` from lowercase str.
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        use AccessType::*;
+        match value {
+            "ro" => Ok(Ro),
+            "wo" => Ok(Wo),
+            "rw" => Ok(Rw),
+            "const" => Ok(Const),
+            _ => Err(()),
+        }
+    }
+}
+
 impl AccessType {
     /// Returns true if an object with this access type can be read
     pub fn is_readable(&self) -> bool {
@@ -112,7 +128,7 @@ impl PdoMappable {
 }
 
 /// Indicate the type of data stored in an object
-#[derive(Copy, Clone, Debug, Default, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u16)]
 pub enum DataType {
     /// A true false value, encoded as a single byte, with 0 for false and 1 for true
@@ -131,9 +147,9 @@ pub enum DataType {
     /// An unsigned 32-bit integer
     UInt32 = 7,
     /// A 32-bit floating point value
-    Real32 = 8,
+    Real32 = 0x8,
     /// An ASCII/utf-8 string
-    VisibleString = 9,
+    VisibleString = 0x9,
     /// A byte string
     OctetString = 0xa,
     /// A unicode string
@@ -145,10 +161,14 @@ pub enum DataType {
     /// An arbitrary byte access type for e.g. data streams, or large chunks of
     /// data. Size is typically not known at build time.
     Domain = 0xf,
+    /// A signed 24-bit integer
+    Int24 = 0x10,
     /// A 64-bit floating point value
     Real64 = 0x11,
     /// A signed 64-bit integer
     Int64 = 0x15,
+    /// An unsigned 24-bit integer
+    UInt24 = 0x16,
     /// An unsigned 64-bit integer
     UInt64 = 0x1b,
     /// A contained for an unrecognized data type value
@@ -171,6 +191,11 @@ impl From<u16> for DataType {
             0xa => OctetString,
             0xb => UnicodeString,
             0xf => Domain,
+            0x10 => Int24,
+            0x11 => Real64,
+            0x15 => Int64,
+            0x16 => UInt24,
+            0x1b => UInt64,
             _ => Other(value),
         }
     }
@@ -223,6 +248,17 @@ impl SubInfo {
     }
 
     /// Convenience function for creating a new sub-info by type
+    pub const fn new_u24() -> Self {
+        Self {
+            size: 3,
+            data_type: DataType::UInt24,
+            access_type: AccessType::Ro,
+            pdo_mapping: PdoMappable::None,
+            persist: false,
+        }
+    }
+
+    /// Convenience function for creating a new sub-info by type
     pub const fn new_u16() -> Self {
         Self {
             size: 2,
@@ -249,6 +285,17 @@ impl SubInfo {
         Self {
             size: 4,
             data_type: DataType::Int32,
+            access_type: AccessType::Ro,
+            pdo_mapping: PdoMappable::None,
+            persist: false,
+        }
+    }
+
+    /// Convenience function for creating a new sub-info by type
+    pub const fn new_i24() -> Self {
+        Self {
+            size: 3,
+            data_type: DataType::Int24,
             access_type: AccessType::Ro,
             pdo_mapping: PdoMappable::None,
             persist: false,
@@ -289,7 +336,18 @@ impl SubInfo {
     }
 
     /// Convenience function for creating a new sub-info by type
-    pub const fn new_visibile_str(size: usize) -> Self {
+    pub const fn new_boolean() -> Self {
+        Self {
+            size: 1,
+            data_type: DataType::Boolean,
+            access_type: AccessType::Ro,
+            pdo_mapping: PdoMappable::None,
+            persist: false,
+        }
+    }
+
+    /// Convenience function for creating a new sub-info by type
+    pub const fn new_visible_str(size: usize) -> Self {
         Self {
             size,
             data_type: DataType::VisibleString,
